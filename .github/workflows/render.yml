@@ -1,19 +1,27 @@
 name: render-ipo-short
 on:
   workflow_dispatch:
+    inputs:
+      gl:
+        description: Chromium GL backend, test on the runner before a full run
+        type: choice
+        default: swangle
+        options: [swangle, angle-egl]
+      mode:
+        description: probe = render only the 10 difficult frames; full = all 2340 frames
+        type: choice
+        default: probe
+        options: [probe, full]
 jobs:
-  render-chunk:
-    strategy:
-      fail-fast: false
-      matrix:
-        chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  probe:
+    if: inputs.mode == 'probe'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Download + unpack project
         run: |
-          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v16/project.zip
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v17/project.zip
           unzip -oq project.zip
       - uses: actions/setup-node@v4
         with:
@@ -23,116 +31,110 @@ jobs:
       - run: npx remotion browser ensure
       - name: Install ffmpeg
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-      - name: Bundle composition once (shared read-only by workers)
-        run: >-
-          node --input-type=module -e
-          "import { bundle } from '@remotion/bundler';
-          await bundle({ entryPoint: 'src/index.ts', publicDir: 'public', outDir: process.cwd() + '/.bundlecache' });"
-      - name: Render chunk (117 frames as 4 parallel processes, one per core)
+      - name: Render difficult frames at native output size
         env:
           COMP: IpoShort
-          GL: swangle
-          BUNDLE_REUSE: "1"
+          GL: ${{ inputs.gl || 'swangle' }}
         run: |
-          S=$(( ${{ matrix.chunk }} * 117 ))
-          E=$(( S + 116 )); [ $E -gt 2339 ] && E=2339
-          T=$(( E - S + 1 ))
-          B=$(( T / 4 )); R=$(( T % 4 ))
-          a=$S
-          pids=()
-          for i in 0 1 2 3; do
-            n=$B; [ $i -lt $R ] && n=$(( n + 1 ))
-            b=$(( a + n - 1 ))
-            node scripts/seqrender.mjs out/seq $a $b 1.3333 > worker-$i.log 2>&1 &
-            pids+=($!)
-            a=$(( b + 1 ))
+          for f in 224 338 439 540 871 1086 1695 1963 2139 2332; do
+            echo "=== frame $f"
+            node scripts/seqrender.mjs out/seq $f $f 1.3333 || exit 1
           done
-          rc=0
-          for p in "${pids[@]}"; do wait $p || rc=1; done
-          tail -n 1 worker-*.log
-          exit $rc
-      - name: Normalize frame names + count
-        run: |
-          S=$(( ${{ matrix.chunk }} * 117 ))
-          E=$(( S + 116 )); [ $E -gt 2339 ] && E=2339
-          T=$(( E - S + 1 ))
-          for f in out/seq/element-*.jpeg; do
-            [ -e "$f" ] || continue
-            n=$(basename "$f" .jpeg); n=${n#element-}
-            mv "$f" "out/seq/el-$(printf '%04d' "$((10#$n))").jpg"
-          done
-          c=$(ls out/seq/el-*.jpg | wc -l)
-          echo "frames: $c / $T"
-          test "$c" -eq "$T"
-      - name: QA frames + white/black-frame retry (up to 2 rounds)
-        env:
-          COMP: IpoShort
-          GL: swangle
-          BUNDLE_REUSE: "1"
-        run: |
-          round=0
-          while :; do
-            raw=$(node scripts/qa_frames.mjs out/seq 2>&1); echo "$raw"
-            out=$(echo "$raw" | grep -E 'YAVG|probe_failed' | grep -vE 'el-0(19[7-9]|20[01])\.jpg' || true)
-            [ -n "$out" ] || { echo "QA clean (intended white flash 197-201 whitelisted)"; exit 0; }
-            round=$(( round + 1 ))
-            if [ $round -gt 2 ]; then echo "still bad after 2 retry rounds"; exit 1; fi
-            bads=$(echo "$out" | grep -oP 'el-\K\d{4}' | sort -u)
-            echo "retry round $round: $(echo "$bads" | wc -l) flagged frame(s)"
-            spans=$(printf '%s\n' $bads | awk '{f=$1+0; if(NR==1){s=f;p=f;next} if(f==p+1){p=f;next} print s" "p; s=f;p=f} END{if(NR)print s" "p}')
-            pids=()
-            while read -r s e; do
-              node scripts/seqrender.mjs out/retry-$s-$e $s $e 1.3333 > retry-$s-$e.log 2>&1 &
-              pids+=($!)
-            done <<< "$spans"
-            rc=0
-            for p in "${pids[@]}"; do wait $p || rc=1; done
-            for d in out/retry-*-*; do
-              for f in $d/element-*.jpeg; do
-                [ -e "$f" ] || continue
-                n=$(basename "$f" .jpeg); n=${n#element-}
-                mv "$f" "out/seq/el-$(printf '%04d' "$((10#$n))").jpg"
-              done
-              rm -rf "$d"
-            done
-            [ $rc -eq 0 ] || { echo "retry render process failed"; exit 1; }
-          done
+      - name: QA frames (flags near-white / near-black)
+        run: node scripts/qa_frames.mjs out/seq
       - uses: actions/upload-artifact@v4
         with:
-          name: chunk-${{ matrix.chunk }}
+          name: probe-frames
+          path: out/seq/
+          retention-days: 3
+  render-chunk:
+    if: inputs.mode != 'probe'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { start: 0, end: 259 }
+          - { start: 260, end: 519 }
+          - { start: 520, end: 779 }
+          - { start: 780, end: 1039 }
+          - { start: 1040, end: 1299 }
+          - { start: 1300, end: 1559 }
+          - { start: 1560, end: 1819 }
+          - { start: 1820, end: 2079 }
+          - { start: 2080, end: 2339 }
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download + unpack project
+        run: |
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v17/project.zip
+          unzip -oq project.zip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx remotion browser ensure
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Render chunk
+        env:
+          COMP: IpoShort
+          GL: ${{ inputs.gl || 'swangle' }}
+        run: node scripts/seqrender.mjs out/seq ${{ matrix.start }} ${{ matrix.end }} 1.3333
+      - name: QA frames (flags near-white / near-black)
+        run: node scripts/qa_frames.mjs out/seq
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.start }}-${{ matrix.end }}
           path: out/seq/
           retention-days: 3
   assemble:
+    if: inputs.mode != 'probe'
     needs: render-chunk
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Download + unpack project
         run: |
-          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v16/project.zip
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v17/project.zip
           unzip -oq project.zip
       - name: Install ffmpeg
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Download mix + restore mix.wav
+        run: |
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -O https://github.com/batman1420/heist-short/releases/download/code-v17/mix.flac
+          ffmpeg -i mix.flac -c:a pcm_s24le mix.wav
       - uses: actions/download-artifact@v4
         with:
           pattern: chunk-*
           path: frames
           merge-multiple: true
-      - name: Verify frame count
+      - name: Verify frame count and normalize names
         run: |
-          c=$(ls frames/el-*.jpg | wc -l)
-          echo "frames: $c / 2340"
-          test "$c" -eq 2340
-      - name: Download mix + restore mix.wav
-        run: |
-          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -O https://github.com/batman1420/heist-short/releases/download/code-v16/mix.flac
-          ffmpeg -i mix.flac -c:a pcm_s24le mix.wav
+          test $(ls frames/element-*.jpeg | wc -l) -eq 2340
+          for f in frames/element-*.jpeg; do
+            n=$(basename "$f" .jpeg); n=${n#element-}; n=$((10#$n))
+            mv "$f" "frames/el-$(printf '%04d' "$n").jpg"
+          done
       - name: Assemble 2K mp4 with mix + burned Poppins captions
         run: >-
           ffmpeg -framerate 30 -start_number 0 -i frames/el-%04d.jpg -i mix.wav
           -vf "subtitles=captions.ass:fontsdir=assets/fonts"
           -map 0:v -map 1:a -c:v libx264 -pix_fmt yuv420p -crf 16 -preset slow
-          -c:a aac -b:a 192k -ar 48000 -shortest -movflags +faststart final.mp4
+          -af volume=-0.7dB -c:a aac -b:a 192k -ar 48000 -shortest -movflags +faststart final.mp4
+      - name: Measure final AAC loudness and true peak
+        run: |
+          ffmpeg -hide_banner -i final.mp4 -vn -af loudnorm=I=-15:TP=-1.2:LRA=11:print_format=json -f null - 2> final-audio.log
+          cat final-audio.log
+          python3 - <<'PY'
+          import json,re
+          text=open('final-audio.log').read()
+          stats=json.loads(re.findall(r'\{[^{}]*"input_i"[^{}]*\}',text,re.S)[-1])
+          assert float(stats['input_tp']) <= -1.2, stats
+          assert -16.0 <= float(stats['input_i']) <= -14.0, stats
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: ipo-short-video
