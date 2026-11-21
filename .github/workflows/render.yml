@@ -7,19 +7,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { start: 0,    end: 299 }
-          - { start: 300,  end: 599 }
-          - { start: 600,  end: 899 }
-          - { start: 900,  end: 1199 }
-          - { start: 1200, end: 1499 }
-          - { start: 1500, end: 1799 }
+          - { start: 0, end: 259 }
+          - { start: 260, end: 519 }
+          - { start: 520, end: 779 }
+          - { start: 780, end: 1039 }
+          - { start: 1040, end: 1299 }
+          - { start: 1300, end: 1559 }
+          - { start: 1560, end: 1819 }
+          - { start: 1820, end: 2079 }
+          - { start: 2080, end: 2339 }
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - name: Download + unpack project
         run: |
-          curl -sSL -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v2/project.zip
+          curl -sSL -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v3/project.zip
           unzip -oq project.zip
       - uses: actions/setup-node@v4
         with:
@@ -46,20 +49,27 @@ jobs:
       - uses: actions/checkout@v4
       - name: Download + unpack project
         run: |
-          curl -sSL -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v2/project.zip
+          curl -sSL -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v3/project.zip
           unzip -oq project.zip
       - uses: actions/download-artifact@v4
         with:
           pattern: chunk-*
           path: frames
           merge-multiple: true
-      - name: Verify frame count
-        run: ls frames/element-*.jpg | wc -l && test $(ls frames/element-*.jpg | wc -l) -eq 1800
-      - name: Download mix
-        run: curl -sSL -O https://github.com/batman1420/heist-short/releases/download/code-v2/mix.wav
+      - name: Verify frame count and normalize names
+        run: |
+          test $(ls frames/element-*.jpeg | wc -l) -eq 2340
+          for f in frames/element-*.jpeg; do
+            n=$(basename "$f" .jpeg); n=${n#element-}
+            mv "$f" "frames/el-$(printf '%04d' "$n").jpg"
+          done
+      - name: Download mix + restore mix.wav
+        run: |
+          curl -sSL -O https://github.com/batman1420/heist-short/releases/download/code-v3/mix.flac
+          ffmpeg -i mix.flac -c:a pcm_s24le mix.wav
       - name: Assemble 2K mp4 with mix + burned Poppins captions
         run: >-
-          ffmpeg -framerate 30 -start_number 0 -i frames/element-%04d.jpg -i mix.wav
+          ffmpeg -framerate 30 -start_number 0 -i frames/el-%04d.jpg -i mix.wav
           -vf "scale=1440:2560,subtitles=captions.ass:fontsdir=assets/fonts"
           -map 0:v -map 1:a -c:v libx264 -pix_fmt yuv420p -crf 17 -preset slow
           -c:a aac -b:a 192k -ar 48000 -shortest -movflags +faststart final.mp4
