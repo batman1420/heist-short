@@ -6,18 +6,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { start: 0, end: 259 }
-          - { start: 260, end: 519 }
-          - { start: 520, end: 779 }
-          - { start: 780, end: 1039 }
-          - { start: 1040, end: 1299 }
-          - { start: 1300, end: 1559 }
-          - { start: 1560, end: 1819 }
-          - { start: 1820, end: 2079 }
-          - { start: 2080, end: 2339 }
+        chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Download + unpack project
@@ -30,16 +21,39 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx remotion browser ensure
-      - name: Render chunk
+      - name: Bundle composition once (shared read-only by workers)
+        run: >-
+          node --input-type=module -e
+          "import { bundle } from '@remotion/bundler';
+          await bundle({ entryPoint: 'src/index.ts', publicDir: 'public', outDir: '.bundlecache' });"
+      - name: Render chunk (117 frames as 4 parallel processes, one per core)
         env:
           COMP: IpoShort
           GL: angle-egl
-        run: node scripts/seqrender.mjs out/seq ${{ matrix.start }} ${{ matrix.end }}
+          BUNDLE_REUSE: "1"
+        run: |
+          S=$(( ${{ matrix.chunk }} * 117 ))
+          E=$(( S + 116 )); [ $E -gt 2339 ] && E=2339
+          T=$(( E - S + 1 ))
+          B=$(( T / 4 )); R=$(( T % 4 ))
+          a=$S
+          pids=()
+          for i in 0 1 2 3; do
+            n=$B; [ $i -lt $R ] && n=$(( n + 1 ))
+            b=$(( a + n - 1 ))
+            node scripts/seqrender.mjs out/seq $a $b > worker-$i.log 2>&1 &
+            pids+=($!)
+            a=$(( b + 1 ))
+          done
+          rc=0
+          for p in "${pids[@]}"; do wait $p || rc=1; done
+          tail -n 1 worker-*.log
+          exit $rc
       - name: QA frames (flags near-white / near-black)
         run: node scripts/qa_frames.mjs out/seq
       - uses: actions/upload-artifact@v4
         with:
-          name: chunk-${{ matrix.start }}-${{ matrix.end }}
+          name: chunk-${{ matrix.chunk }}
           path: out/seq/
           retention-days: 3
   assemble:
