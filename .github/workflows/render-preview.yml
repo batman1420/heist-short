@@ -29,7 +29,7 @@ jobs:
       - name: Render chunk (117 frames as 4 parallel processes, one per core)
         env:
           COMP: IpoShort
-          GL: angle
+          GL: swangle
           BUNDLE_REUSE: "1"
         run: |
           S=$(( ${{ matrix.chunk }} * 117 ))
@@ -65,7 +65,7 @@ jobs:
       - name: QA frames + white/black-frame retry (up to 2 rounds)
         env:
           COMP: IpoShort
-          GL: angle
+          GL: swangle
           BUNDLE_REUSE: "1"
         run: |
           round=0
