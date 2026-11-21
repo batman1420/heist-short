@@ -47,7 +47,7 @@ jobs:
           done
           rc=0
           for p in "${pids[@]}"; do wait $p || rc=1; done
-          tail -n 30 worker-*.log
+          echo '=== worker-0 head ==='; head -n 150 worker-0.log; echo '=== worker-0 tail ==='; tail -n 40 worker-0.log
           exit $rc
       - name: Normalize frame names + count
         run: |
