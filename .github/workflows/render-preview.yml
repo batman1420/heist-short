@@ -1,0 +1,134 @@
+name: render-ipo-short-preview
+on:
+  workflow_dispatch:
+jobs:
+  render-chunk:
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download + unpack project
+        run: |
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v14/project.zip
+          unzip -oq project.zip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx remotion browser ensure
+      - name: Bundle composition once (shared read-only by workers)
+        run: >-
+          node --input-type=module -e
+          "import { bundle } from '@remotion/bundler';
+          await bundle({ entryPoint: 'src/index.ts', publicDir: 'public', outDir: '.bundlecache' });"
+      - name: Render chunk (117 frames as 4 parallel processes, one per core)
+        env:
+          COMP: IpoShort
+          GL: angle-egl
+          BUNDLE_REUSE: "1"
+        run: |
+          S=$(( ${{ matrix.chunk }} * 117 ))
+          E=$(( S + 116 )); [ $E -gt 2339 ] && E=2339
+          T=$(( E - S + 1 ))
+          B=$(( T / 4 )); R=$(( T % 4 ))
+          a=$S
+          pids=()
+          for i in 0 1 2 3; do
+            n=$B; [ $i -lt $R ] && n=$(( n + 1 ))
+            b=$(( a + n - 1 ))
+            node scripts/seqrender.mjs out/seq $a $b 0.6667 > worker-$i.log 2>&1 &
+            pids+=($!)
+            a=$(( b + 1 ))
+          done
+          rc=0
+          for p in "${pids[@]}"; do wait $p || rc=1; done
+          tail -n 1 worker-*.log
+          exit $rc
+      - name: Normalize frame names + count
+        run: |
+          S=$(( ${{ matrix.chunk }} * 117 ))
+          E=$(( S + 116 )); [ $E -gt 2339 ] && E=2339
+          T=$(( E - S + 1 ))
+          for f in out/seq/element-*.jpeg; do
+            [ -e "$f" ] || continue
+            n=$(basename "$f" .jpeg); n=${n#element-}
+            mv "$f" "out/seq/el-$(printf '%04d' "$((10#$n))").jpg"
+          done
+          c=$(ls out/seq/el-*.jpg | wc -l)
+          echo "frames: $c / $T"
+          test "$c" -eq "$T"
+      - name: QA frames + white/black-frame retry (up to 2 rounds)
+        env:
+          COMP: IpoShort
+          GL: angle-egl
+          BUNDLE_REUSE: "1"
+        run: |
+          round=0
+          while :; do
+            out=$(node scripts/qa_frames.mjs out/seq 2>&1); echo "$out"
+            echo "$out" | grep -q '^BAD' || exit 0
+            round=$(( round + 1 ))
+            if [ $round -gt 2 ]; then echo "still bad after 2 retry rounds"; exit 1; fi
+            bads=$(echo "$out" | grep -oP 'el-\K\d{4}' | sort -u)
+            echo "retry round $round: $(echo "$bads" | wc -l) flagged frame(s)"
+            spans=$(printf '%s\n' $bads | awk '{f=$1+0; if(NR==1){s=f;p=f;next} if(f==p+1){p=f;next} print s" "p; s=f;p=f} END{if(NR)print s" "p}')
+            pids=()
+            while read -r s e; do
+              node scripts/seqrender.mjs out/retry-$s-$e $s $e 0.6667 > retry-$s-$e.log 2>&1 &
+              pids+=($!)
+            done <<< "$spans"
+            rc=0
+            for p in "${pids[@]}"; do wait $p || rc=1; done
+            for d in out/retry-*-*; do
+              for f in $d/element-*.jpeg; do
+                [ -e "$f" ] || continue
+                n=$(basename "$f" .jpeg); n=${n#element-}
+                mv "$f" "out/seq/el-$(printf '%04d' "$((10#$n))").jpg"
+              done
+              rm -rf "$d"
+            done
+            [ $rc -eq 0 ] || { echo "retry render process failed"; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.chunk }}
+          path: out/seq/
+          retention-days: 3
+  assemble:
+    needs: render-chunk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download + unpack project
+        run: |
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v14/project.zip
+          unzip -oq project.zip
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: chunk-*
+          path: frames
+          merge-multiple: true
+      - name: Verify frame count
+        run: |
+          c=$(ls frames/el-*.jpg | wc -l)
+          echo "frames: $c / 2340"
+          test "$c" -eq 2340
+      - name: Download mix + restore mix.wav
+        run: |
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -O https://github.com/batman1420/heist-short/releases/download/code-v14/mix.flac
+          ffmpeg -i mix.flac -c:a pcm_s24le mix.wav
+      - name: Assemble 2K mp4 with mix + burned Poppins captions
+        run: >-
+          ffmpeg -framerate 30 -start_number 0 -i frames/el-%04d.jpg -i mix.wav
+          -vf "subtitles=captions.ass:fontsdir=assets/fonts"
+          -map 0:v -map 1:a -c:v libx264 -pix_fmt yuv420p -crf 28 -preset veryfast
+          -c:a aac -b:a 192k -ar 48000 -shortest -movflags +faststart final.mp4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipo-short-preview
+          path: final.mp4
