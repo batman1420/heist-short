@@ -21,6 +21,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx remotion browser ensure
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - name: Bundle composition once (shared read-only by workers)
         run: >-
           node --input-type=module -e
@@ -29,7 +31,7 @@ jobs:
       - name: Render chunk (117 frames as 4 parallel processes, one per core)
         env:
           COMP: IpoShort
-          GL: angle-egl
+          GL: swangle
           BUNDLE_REUSE: "1"
         run: |
           S=$(( ${{ matrix.chunk }} * 117 ))
@@ -65,13 +67,14 @@ jobs:
       - name: QA frames + white/black-frame retry (up to 2 rounds)
         env:
           COMP: IpoShort
-          GL: angle-egl
+          GL: swangle
           BUNDLE_REUSE: "1"
         run: |
           round=0
           while :; do
-            out=$(node scripts/qa_frames.mjs out/seq 2>&1); echo "$out"
-            echo "$out" | grep -q '^BAD' || exit 0
+            raw=$(node scripts/qa_frames.mjs out/seq 2>&1); echo "$raw"
+            out=$(echo "$raw" | grep -E 'YAVG|probe_failed' | grep -vE 'el-0(19[7-9]|20[01])\.jpg' || true)
+            [ -n "$out" ] || { echo "QA clean (intended white flash 197-201 whitelisted)"; exit 0; }
             round=$(( round + 1 ))
             if [ $round -gt 2 ]; then echo "still bad after 2 retry rounds"; exit 1; fi
             bads=$(echo "$out" | grep -oP 'el-\K\d{4}' | sort -u)
@@ -108,6 +111,8 @@ jobs:
         run: |
           curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v14/project.zip
           unzip -oq project.zip
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - uses: actions/download-artifact@v4
         with:
           pattern: chunk-*
