@@ -20,7 +20,7 @@ jobs:
       - name: Download + unpack project
         run: |
           curl -sSL -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v2/project.zip
-          unzip -q project.zip
+          unzip -oq project.zip
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -47,7 +47,7 @@ jobs:
       - name: Download + unpack project
         run: |
           curl -sSL -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v2/project.zip
-          unzip -q project.zip
+          unzip -oq project.zip
       - uses: actions/download-artifact@v4
         with:
           pattern: chunk-*
