@@ -1,0 +1,56 @@
+name: render-ipo-short
+on:
+  workflow_dispatch:
+jobs:
+  render-chunk:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { start: 0,    end: 284 }
+          - { start: 285,  end: 569 }
+          - { start: 570,  end: 854 }
+          - { start: 855,  end: 1139 }
+          - { start: 1140, end: 1424 }
+          - { start: 1425, end: 1709 }
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack project
+        run: unzip -q project.zip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx remotion browser ensure
+      - name: Render chunk
+        env:
+          COMP: IpoShort
+          GL: angle-egl
+        run: node scripts/seqrender.mjs out/seq ${{ matrix.start }} ${{ matrix.end }}
+      - name: QA frames (flags near-white / near-black)
+        run: node scripts/qa_frames.mjs out/seq
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.start }}-${{ matrix.end }}
+          path: out/seq/
+          retention-days: 3
+  assemble:
+    needs: render-chunk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: chunk-*
+          path: frames
+          merge-multiple: true
+      - name: Verify frame count
+        run: ls frames/element-*.jpg | wc -l && test $(ls frames/element-*.jpg | wc -l) -eq 1710
+      - name: Assemble mp4
+        run: ffmpeg -framerate 30 -start_number 0 -i frames/element-%04d.jpg -c:v libx264 -pix_fmt yuv420p -crf 17 -movflags +faststart final.mp4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipo-short-video
+          path: final.mp4
