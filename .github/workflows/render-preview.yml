@@ -21,6 +21,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx remotion browser ensure
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - name: Bundle composition once (shared read-only by workers)
         run: >-
           node --input-type=module -e
@@ -108,6 +110,8 @@ jobs:
         run: |
           curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v14/project.zip
           unzip -oq project.zip
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - uses: actions/download-artifact@v4
         with:
           pattern: chunk-*
