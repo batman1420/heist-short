@@ -1,4 +1,4 @@
-name: render-ipo-v18-partial
+name: render-ipo-v19-s9-partial
 on:
   workflow_dispatch:
     inputs:
@@ -7,6 +7,11 @@ on:
         type: string
         required: true
         default: "44960698729"
+      v18_run_id:
+        description: Successful v18 run with its four raw patch artifacts
+        type: string
+        required: true
+        default: "44966804797"
       gl:
         description: Chromium GL backend, test on the runner before a full run
         type: choice
@@ -18,17 +23,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { start: 315, end: 519 }
-          - { start: 520, end: 720 }
-          - { start: 1104, end: 1202 }
-          - { start: 2051, end: 2230 }
+          - { start: 821, end: 915 }
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
       - name: Download + unpack project
         run: |
-          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v18/project.zip
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v19/project.zip
           unzip -oq project.zip
       - uses: actions/setup-node@v4
         with:
@@ -47,7 +49,7 @@ jobs:
         run: node scripts/qa_frames.mjs out/seq
       - uses: actions/upload-artifact@v4
         with:
-          name: v18-patch-${{ matrix.start }}-${{ matrix.end }}
+          name: v19-patch-${{ matrix.start }}-${{ matrix.end }}
           path: out/seq/
           retention-days: 3
   assemble:
@@ -60,13 +62,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Download + unpack project
         run: |
-          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v18/project.zip
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v19/project.zip
           unzip -oq project.zip
       - name: Install ffmpeg
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - name: Download mix + restore mix.wav
         run: |
-          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -O https://github.com/batman1420/heist-short/releases/download/code-v18/mix.flac
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -O https://github.com/batman1420/heist-short/releases/download/code-v19/mix.flac
           ffmpeg -i mix.flac -c:a pcm_s24le mix.wav
       - name: Download cached v17 raw frame artifacts
         uses: actions/download-artifact@v4
@@ -76,14 +78,24 @@ jobs:
           pattern: chunk-*
           path: baseline-v17
           merge-multiple: true
-      - name: Download only current v18 patch artifacts
+      - name: Download cached v18 patch artifacts
         uses: actions/download-artifact@v4
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.v18_run_id }}
           pattern: v18-patch-*
           path: patch-v18
           merge-multiple: true
-      - name: Verify and merge cached frames with patches
-        run: python3 scripts/merge-v18-frames.py baseline-v17 patch-v18 frames
+      - name: Reconstruct complete v18 raw baseline without rendering
+        run: python3 scripts/merge-v18-frames.py baseline-v17 patch-v18 baseline-v18
+      - name: Download only current v19 patch artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v19-patch-*
+          path: patch-v19
+          merge-multiple: true
+      - name: Merge the S9-only patch into v18 baseline
+        run: python3 scripts/merge-v19-frames.py baseline-v18 patch-v19 frames
       - name: Assemble 2K mp4 with mix + burned Poppins captions
         run: >-
           ffmpeg -framerate 30 -start_number 0 -i frames/el-%04d.jpg -i mix.wav
@@ -103,10 +115,14 @@ jobs:
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: ipo-short-video-v18
-          path: final.mp4
-      - uses: actions/upload-artifact@v4
+          name: ipo-short-video-v19
+          path: |
+            final.mp4
+            final-audio.log
+            frames/provenance.json
+      - name: Preserve merged uncaptioned raw cache for later surgical patches
+        uses: actions/upload-artifact@v4
         with:
-          name: v18-merge-provenance
-          path: frames/provenance.json
-          retention-days: 30
+          name: v19-merged-raw-frames
+          path: frames/
+          retention-days: 7
