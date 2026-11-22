@@ -1,74 +1,34 @@
-name: render-ipo-short
+name: render-ipo-v18-partial
 on:
   workflow_dispatch:
     inputs:
+      v17_run_id:
+        description: Successful v17 run with all nine raw chunk artifacts, verify before dispatch
+        type: string
+        required: true
+        default: "44960698729"
       gl:
         description: Chromium GL backend, test on the runner before a full run
         type: choice
         default: swangle
         options: [swangle, angle-egl]
-      mode:
-        description: probe = render only the 10 difficult frames; full = all 2340 frames
-        type: choice
-        default: probe
-        options: [probe, full]
 jobs:
-  probe:
-    if: inputs.mode == 'probe'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - name: Download + unpack project
-        run: |
-          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v17/project.zip
-          unzip -oq project.zip
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npx remotion browser ensure
-      - name: Install ffmpeg
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-      - name: Render difficult frames at native output size
-        env:
-          COMP: IpoShort
-          GL: ${{ inputs.gl || 'swangle' }}
-        run: |
-          for f in 224 338 439 540 871 1086 1695 1963 2139 2332; do
-            echo "=== frame $f"
-            node scripts/seqrender.mjs out/seq $f $f 1.3333 || exit 1
-          done
-      - name: QA frames (flags near-white / near-black)
-        run: node scripts/qa_frames.mjs out/seq
-      - uses: actions/upload-artifact@v4
-        with:
-          name: probe-frames
-          path: out/seq/
-          retention-days: 3
   render-chunk:
-    if: inputs.mode != 'probe'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { start: 0, end: 259 }
-          - { start: 260, end: 519 }
-          - { start: 520, end: 779 }
-          - { start: 780, end: 1039 }
-          - { start: 1040, end: 1299 }
-          - { start: 1300, end: 1559 }
-          - { start: 1560, end: 1819 }
-          - { start: 1820, end: 2079 }
-          - { start: 2080, end: 2339 }
+          - { start: 315, end: 519 }
+          - { start: 520, end: 720 }
+          - { start: 1104, end: 1202 }
+          - { start: 2051, end: 2230 }
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
       - name: Download + unpack project
         run: |
-          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v17/project.zip
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v18/project.zip
           unzip -oq project.zip
       - uses: actions/setup-node@v4
         with:
@@ -87,37 +47,43 @@ jobs:
         run: node scripts/qa_frames.mjs out/seq
       - uses: actions/upload-artifact@v4
         with:
-          name: chunk-${{ matrix.start }}-${{ matrix.end }}
+          name: v18-patch-${{ matrix.start }}-${{ matrix.end }}
           path: out/seq/
           retention-days: 3
   assemble:
-    if: inputs.mode != 'probe'
+    permissions:
+      contents: read
+      actions: read
     needs: render-chunk
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Download + unpack project
         run: |
-          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v17/project.zip
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -o project.zip https://github.com/batman1420/heist-short/releases/download/code-v18/project.zip
           unzip -oq project.zip
       - name: Install ffmpeg
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - name: Download mix + restore mix.wav
         run: |
-          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -O https://github.com/batman1420/heist-short/releases/download/code-v17/mix.flac
+          curl -sSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -O https://github.com/batman1420/heist-short/releases/download/code-v18/mix.flac
           ffmpeg -i mix.flac -c:a pcm_s24le mix.wav
-      - uses: actions/download-artifact@v4
+      - name: Download cached v17 raw frame artifacts
+        uses: actions/download-artifact@v4
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.v17_run_id }}
           pattern: chunk-*
-          path: frames
+          path: baseline-v17
           merge-multiple: true
-      - name: Verify frame count and normalize names
-        run: |
-          test $(ls frames/element-*.jpeg | wc -l) -eq 2340
-          for f in frames/element-*.jpeg; do
-            n=$(basename "$f" .jpeg); n=${n#element-}; n=$((10#$n))
-            mv "$f" "frames/el-$(printf '%04d' "$n").jpg"
-          done
+      - name: Download only current v18 patch artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v18-patch-*
+          path: patch-v18
+          merge-multiple: true
+      - name: Verify and merge cached frames with patches
+        run: python3 scripts/merge-v18-frames.py baseline-v17 patch-v18 frames
       - name: Assemble 2K mp4 with mix + burned Poppins captions
         run: >-
           ffmpeg -framerate 30 -start_number 0 -i frames/el-%04d.jpg -i mix.wav
@@ -137,5 +103,10 @@ jobs:
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: ipo-short-video
+          name: ipo-short-video-v18
           path: final.mp4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v18-merge-provenance
+          path: frames/provenance.json
+          retention-days: 30
